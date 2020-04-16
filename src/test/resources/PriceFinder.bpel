@@ -1,0 +1,168 @@
+<?xml version = "1.0" encoding = "UTF-8" ?>
+<!--
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+  Oracle JDeveloper BPEL Designer 
+  
+  Created: Fri Apr 21 10:53:35 PDT 2006
+  Author:  kmreddy
+  Purpose: Asynchronous BPEL Process
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+-->
+<process name="PriceFinder"
+         targetNamespace="http://xmlns.oracle.com/PriceFinder"
+         xmlns="http://schemas.xmlsoap.org/ws/2003/03/business-process/"
+         xmlns:xp20="http://www.oracle.com/XSL/Transform/java/oracle.tip.pc.services.functions.Xpath20"
+         xmlns:bpws="http://schemas.xmlsoap.org/ws/2003/03/business-process/"
+         xmlns:ns4="http://xmlns.oracle.com/bpel/services/IdentityService"
+         xmlns:ns1="http://xmlns.oracle.com/FlakyPriceProvider"
+         xmlns:ldap="http://schemas.oracle.com/xpath/extension/ldap"
+         xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+         xmlns:ns3="http://xmlns.oracle.com/FreeShippingPriceProvider"
+         xmlns:ns2="http://xmlns.oracle.com/PriceProvider"
+         xmlns:client="http://xmlns.oracle.com/PriceFinder"
+         xmlns:bpelx="http://schemas.oracle.com/bpel/extension"
+         xmlns:ora="http://schemas.oracle.com/xpath/extension"
+         xmlns:orcl="http://www.oracle.com/XSL/Transform/java/oracle.tip.pc.services.functions.ExtFunc">
+    <!-- 
+      ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        PARTNERLINKS                                                      
+        List of services participating in this BPEL process               
+      ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    -->
+    <partnerLinks>
+        <!-- 
+      The 'client' role represents the requester of this service. It is 
+      used for callback. The location and correlation information associated
+      with the client role are automatically set using WS-Addressing.
+    -->
+        <partnerLink name="client" partnerLinkType="client:PriceFinder"
+                     myRole="PriceFinderProvider"
+                     partnerRole="PriceFinderRequester"/>
+        <partnerLink name="FlakyPriceProvider"
+                     partnerRole="FlakyPriceProviderProvider"
+                     partnerLinkType="ns1:FlakyPriceProvider"/>
+        <partnerLink myRole="FreeShippingPriceProviderRequester"
+                     name="FreeShippingPriceProvider"
+                     partnerRole="FreeShippingPriceProviderProvider"
+                     partnerLinkType="ns3:FreeShippingPriceProvider"/>
+    </partnerLinks>
+    <!-- 
+      ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        VARIABLES                                                        
+        List of messages and XML documents used within this BPEL process 
+      ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    -->
+    <variables>
+        <!-- Reference to the message passed as input during initiation -->
+        <variable name="inputVariable"
+                  messageType="client:PriceFinderRequestMessage"/>
+        <!-- Reference to the message that will be sent back to the requester during callback -->
+        <variable name="outputVariable"
+                  messageType="client:PriceFinderResponseMessage"/>
+        <variable name="flakyProviderOutput"
+                  messageType="ns1:FlakyPriceProviderResponseMessage"/>
+        <variable name="FlakyProviderInput"
+                  messageType="ns1:FlakyPriceProviderRequestMessage"/>
+        <variable name="FreeShippingInput"
+                  messageType="ns3:FreeShippingPriceProviderRequestMessage"/>
+        <variable name="FreeShippingOutput"
+                  messageType="ns3:FreeShippingPriceProviderResponseMessage"/>
+        <variable name="FaultVar"
+                  messageType="ns1:FlakyPriceProviderFaultMessage"/>
+        <variable name="flakyFaulted" type="xsd:boolean"/>
+    </variables>
+    <!-- 
+      ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+       ORCHESTRATION LOGIC                                               
+       Set of activities coordinating the flow of messages across the    
+       services integrated within this business process                  
+      ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    -->
+    <sequence name="main">
+        <!-- Receive input from requestor. (Note: This maps to operation defined in PriceFinder.wsdl) -->
+        <receive name="receiveInput" partnerLink="client"
+                 portType="client:PriceFinder" operation="initiate"
+                 variable="inputVariable" createInstance="yes"/>
+        <!-- 
+          Asynchronous callback to the requester. (Note: the callback location and correlation id is transparently handled using WS-addressing.)
+        -->
+        <flow name="checkPrices">
+            <sequence name="FreeShippingProvider">
+                <assign name="AssignFreeShippingInput">
+                    <copy>
+                        <from variable="inputVariable" part="payload"/>
+                        <to variable="FreeShippingInput" part="payload"/>
+                    </copy>
+                </assign>
+                <invoke name="FreeShippingInvoke"
+                        partnerLink="FreeShippingPriceProvider"
+                        portType="ns3:FreeShippingPriceProvider"
+                        operation="initiate" inputVariable="FreeShippingInput"/>
+                <receive name="FreeShippingReceive"
+                         partnerLink="FreeShippingPriceProvider"
+                         portType="ns3:FreeShippingPriceProviderCallback"
+                         operation="onResult" variable="FreeShippingOutput"
+                         createInstance="no"/>
+            </sequence>
+            <sequence name="FlakyProvider">
+                <assign name="AssignFlakyInput">
+                    <copy>
+                        <from variable="inputVariable" part="payload"/>
+                        <to variable="FlakyProviderInput" part="payload"/>
+                    </copy>
+                </assign>
+                <scope name="Scope_1">
+                    <faultHandlers>
+                        <catch faultName="ns1:ServiceError"
+                               faultVariable="FaultVar">
+                            <assign name="flakyFaulted">
+                                <copy>
+                                    <from expression="true()"/>
+                                    <to variable="flakyFaulted"/>
+                                </copy>
+                            </assign>
+                        </catch>
+                    </faultHandlers>
+                    <sequence name="Sequence_2">
+                        <invoke name="FlakyInvoke"
+                                partnerLink="FlakyPriceProvider"
+                                portType="ns1:FlakyPriceProvider"
+                                operation="process"
+                                inputVariable="FlakyProviderInput"
+                                outputVariable="flakyProviderOutput"/>
+                        <assign name="flakyOk">
+                            <copy>
+                                <from expression="false()"/>
+                                <to variable="flakyFaulted"/>
+                            </copy>
+                        </assign>
+                    </sequence>
+                </scope>
+            </sequence>
+        </flow>
+        <switch name="choosePrice">
+            <case condition="not(boolean(bpws:getVariableData('flakyFaulted'))) and number(bpws:getVariableData('flakyProviderOutput','payload','/ns2:PriceProviderProcessResponse/ns2:itemPrice')) &lt; number(bpws:getVariableData('FreeShippingOutput','payload','/ns2:PriceProviderProcessResponse/ns2:itemPrice'))">
+                <bpelx:annotation>
+                    <bpelx:pattern>chooseFlaky</bpelx:pattern>
+                </bpelx:annotation>
+                <assign name="chooseFlakyPrice">
+                    <copy>
+                        <from variable="flakyProviderOutput" part="payload"/>
+                        <to variable="outputVariable" part="payload"/>
+                    </copy>
+                </assign>
+            </case>
+            <otherwise>
+                <assign name="chooseFreeShippingPrice">
+                    <copy>
+                        <from variable="FreeShippingOutput" part="payload"/>
+                        <to variable="outputVariable" part="payload"/>
+                    </copy>
+                </assign>
+            </otherwise>
+        </switch>
+        <invoke name="callbackClient" partnerLink="client"
+                portType="client:PriceFinderCallback" operation="onResult"
+                inputVariable="outputVariable"/>
+    </sequence>
+</process>
